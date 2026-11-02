@@ -2,7 +2,7 @@
 Bluesky Strike Monitor - Mistral Workflow worker.
 
 Chaque execution:
-  1. recupere les posts des dernieres N heures (24 par defaut) d'une liste
+  1. recupere les posts des dernieres N heures (12 par defaut) d'une liste
      de comptes Bluesky (OSINT / presse ukrainienne et internationale),
   2. filtre ceux qui mentionnent des frappes de drones/missiles ukrainiens
      sur le territoire russe,
@@ -250,6 +250,7 @@ BSKY_ACCOUNTS: list[str] = [
     "covertshores.bsky.social",
     "thestudyofwar.bsky.social",
     "noelreports.com",
+    "kyivpost.com",
 ]
 
 # ---------------------------------------------------------------------------
@@ -269,6 +270,8 @@ STRIKE_KEYWORDS: list[str] = [
     "нпз", "рафинерия", "аэродром", "склад", "завод",
     # allemand (certains comptes francophones/germanophones)
     "drohne", "rakete", "raffinerie",
+    # culture Internet / jargon specifique au conflit en Ukraine
+    "bavovna", "banderol", "meatwave", "kinetic sanction", "fp-7", "fp-9",
 ]
 
 # Mots-cles qui signalent un contexte "cible en Russie"
@@ -276,6 +279,8 @@ RUSSIA_CONTEXT_KEYWORDS: list[str] = [
     "russia", "russian", "moscow", "belgorod", "kursk", "voronezh", "rostov",
     "nizhny novgorod", "kstovo", "saratov", "samara", "smolensk", "bryansk",
     "oryol", "tula", "novorossiysk", "krai", "oblast", " Crimea".strip(),
+    # jargon du conflit designant la Russie / l'armee russe
+    "ruzzia", "putler", "orcs",
     "россия", "москва", "белгород", "курск", "воронеж", "ростов",
     "нижний новгород", "кстово", "саратов", "самара", "смоленск", "брянск",
     "орел", "тула",
@@ -626,7 +631,7 @@ async def compile_report(collected: dict[str, Any], aggregation: dict[str, Any],
     lines = [
         f"# Frappes ukrainiennes sur le territoire russe - rapport du {run_iso}",
         "",
-        f"Fenetre : posts depuis {since_iso} (dernieres 24 h).",
+        f"Fenetre : posts depuis {since_iso} (dernieres {lookback} h).",
         f"Comptes scannes : {stats['accounts_total']} "
         f"({stats['accounts_ok']} OK, {stats['accounts_unreachable']} inaccessibles), "
         f"{stats['posts_scanned']} posts recents scannes, "
@@ -692,7 +697,7 @@ async def compile_report(collected: dict[str, Any], aggregation: dict[str, Any],
 class BlueskyStrikeMonitor:
     @workflows.workflow.entrypoint
     async def run(self) -> str:
-        lookback = 24
+        lookback = 12  # les frappes ont lieu de nuit : 12 h couvrent 20h-8h
         now = workflows.workflow.now()
         since = now - timedelta(hours=lookback)
         since_iso = since.isoformat()
