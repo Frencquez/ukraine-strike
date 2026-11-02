@@ -477,23 +477,26 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
 
     import httpx
 
-    async with httpx.AsyncClient(
+    # Client cree sans gestionnaire de contexte : les appels _chat sont
+    # awaits dans le bloc try ci-dessous, apres la definition.
+    client = httpx.AsyncClient(
         timeout=httpx.Timeout(LLM_TIMEOUT_SECONDS),
         headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json"},
-    ) as client:
-        async def _chat(prompt: str) -> str:
-            resp = await client.post(
-                "https://api.mistral.ai/v1/chat/completions",
-                json={
-                    "model": AGGREGATION_MODEL,
-                    "temperature": 0.1,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"] or ""
+    )
+
+    async def _chat(prompt: str) -> str:
+        resp = await client.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            json={
+                "model": AGGREGATION_MODEL,
+                "temperature": 0.1,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"] or ""
 
     try:
         # ---- Etape "map" : extraction d'evenements par lot de posts ----
