@@ -503,7 +503,7 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
             lines = "\n".join(
                 _compact_post(start + i, p) for i, p in enumerate(batch)
             )
-            raw = _chat(MAP_PROMPT.format(posts=lines))
+            raw = await _chat(MAP_PROMPT.format(posts=lines))
             data = _parse_json_content(raw)
             for ev in data.get("events", []):
                 ids = []
@@ -533,7 +533,7 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
             for pid in ev["post_ids"]:
                 events_repr += "\n" + _compact_post(pid, sources[pid])
 
-        raw = _chat(REDUCE_PROMPT.format(events=events_repr))
+        raw = await _chat(REDUCE_PROMPT.format(events=events_repr))
         data = _parse_json_content(raw)
         events: list[dict[str, Any]] = []
         for ev in data.get("events", []):
