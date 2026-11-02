@@ -18,13 +18,14 @@ Fichiers du depot :
 """
 
 import asyncio
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
-import httpx
 import mistralai.workflows as workflows
-from pydantic import BaseModel, ConfigDict
+
+# NOTE : ne PAS importer httpx/pydantic ici (niveau module) :
+# le bac a sable de validation Temporal des workflows bloque les
+# imports tiers au niveau du module. Les importer dans les activites.
 
 # ---------------------------------------------------------------------------
 # Comptes Bluesky a surveiller
@@ -300,6 +301,7 @@ def _matches_filter(text: str) -> bool:
 async def fetch_matching_posts(since_iso: str) -> dict[str, Any]:
     """Recupere les posts recents de tous les comptes et retourne ceux
     qui correspondent au filtre 'frappe en Russie'."""
+    import httpx  # import local : les activites ne sont pas sandboxees
     since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
     matching: list[dict[str, Any]] = []
     unreachable: list[str] = []
