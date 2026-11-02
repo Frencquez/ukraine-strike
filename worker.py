@@ -406,7 +406,10 @@ Pour chaque evenement identifie, retourne :
 - "post_ids" : les numeros des posts qui s'y rapportent,
 - "hint" : une phrase resume de l'evenement.
 
-Un post ne peut appartenir qu'a un seul evenement (celui qu'il decrit principalement). Un post purement general (pas un evenement concret) doit etre ignore. Reponds UNIQUEMENT en JSON valide.
+Un post ne peut appartenir qu'a un seul evenement (celui qu'il decrit principalement). Un post purement general (pas un evenement concret) doit etre ignore.
+
+Reponds UNIQUEMENT avec un objet JSON valide de la forme exacte :
+{"events": [{"title": "...", "post_ids": [0], "hint": "..."}]}
 
 Posts :
 {posts}"""
@@ -423,7 +426,10 @@ Taches :
    - "disagreements" : si des comptes se contredisent sur cet evenement, liste les desaccords en precisant QUEL compte dit QUOI (tableau de chaines, chaque entree au format "@compte : affirmation"). Sinon tableau vide.
    - "latest_correction" : si un post recent corrige des informations anterieures erronees, resume la correction en une phrase ; sinon chaine vide.
    - "post_ids" : tous les numeros de posts rattaches a cet evenement.
-3. Ne garde QUE les evenements correspondant a une frappe ukrainienne sur le territoire russe ou directement lies (infrastructure russe ou territories occupes). Reponds UNIQUEMENT en JSON valide.
+3. Ne garde QUE les evenements correspondant a une frappe ukrainienne sur le territoire russe ou directement lies (infrastructure russe ou territories occupes).
+
+Reponds UNIQUEMENT avec un objet JSON valide de la forme exacte :
+{"events": [{"title": "...", "summary": "...", "disagreements": ["@compte : affirmation"], "latest_correction": "...", "post_ids": [0]}]}
 
 Evenements candidats :
 {events}"""
@@ -435,7 +441,11 @@ def _compact_post(idx: int, p: dict[str, Any]) -> str:
 
 
 def _parse_json_content(content: str) -> Any:
-    """Extrait le premier objet JSON d'une reponse du modele."""
+    """Extrait le premier objet JSON d'une reponse du modele.
+
+    Tolere le JSON suivi de texte parasite ("Extra data"), les clotures
+    de bloc ``` et les accolades imbriquees dans les chaines.
+    """
     content = content.strip()
     if content.startswith("```"):
         content = content.split("```")[1]
@@ -443,10 +453,18 @@ def _parse_json_content(content: str) -> Any:
             content = content[4:]
         content = content.strip()
     start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError("Aucun JSON trouve dans la reponse du modele")
-    return json.loads(content[start:end + 1])
+    try:
+        # raw_decode : lit le PREMIER objet JSON complet et ignore ce qui suit
+        value, _ = json.JSONDecoder().raw_decode(content[start:])
+        return value
+    except json.JSONDecodeError:
+        # Repli : du plus grand segment compris entre accolades
+        end = content.rfind("}")
+        if end <= start:
+            raise ValueError("JSON incomplet dans la reponse du modele")
+        return json.loads(content[start:end + 1])
 
 
 @workflows.activity(
@@ -468,7 +486,7 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
         os.environ.get("UKRAINE_STRIKE", "")
         or os.environ.get("BSKY_MISTRAL_API_KEY", "")
         or os.environ.get("MISTRAL_API_KEY", "")
-    )
+    ).strip()
     if not posts:
         return {"events": [], "mode": "llm", "error": None}
     if not api_key:
@@ -491,6 +509,7 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
             json={
                 "model": AGGREGATION_MODEL,
                 "temperature": 0.1,
+                "response_format": {"type": "json_object"},
                 "messages": [{"role": "user", "content": prompt}],
             },
         )
