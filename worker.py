@@ -618,7 +618,7 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
 
 @workflows.activity(start_to_close_timeout=timedelta(minutes=2))
 async def compile_report(collected: dict[str, Any], aggregation: dict[str, Any],
-                         since_iso: str, run_iso: str) -> dict[str, Any]:
+                        since_iso: str, run_iso: str, lookback: int = 12) -> dict[str, Any]:
     """Compile le rapport Markdown : evenement par evenement (classes par
     nombre de posts), ou compte par compte en cas de repli."""
     posts = collected["posts"]
