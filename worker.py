@@ -467,6 +467,27 @@ def _parse_json_content(content: str) -> Any:
         return json.loads(content[start:end + 1])
 
 
+def _get_events(data: Any) -> list[Any]:
+    """Extrait la liste d'evenements d'une reponse du modele, de facon
+    tolerante : cles avec guillemets parasites, reponse qui est directement
+    une liste, valeur "events" elle-meme une chaine JSON, etc."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key, value in data.items():
+        if str(key).strip().strip("\"'") == "events":
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    return []
+            return value if isinstance(value, list) else []
+    # Dernier recours : unique cle dont la valeur est une liste
+    lists = [v for v in data.values() if isinstance(v, list)]
+    return lists[0] if len(lists) == 1 else []
+
+
 @workflows.activity(
     start_to_close_timeout=timedelta(minutes=20),
     retry_policy_max_attempts=2,
@@ -518,6 +539,7 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
         return data["choices"][0]["message"]["content"] or ""
 
     try:
+        last_raw = ""
         # ---- Etape "map" : extraction d'evenements par lot de posts ----
         candidate_events: list[dict[str, Any]] = []
         for start in range(0, len(posts), BATCH_SIZE):
@@ -526,8 +548,9 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
                 _compact_post(start + i, p) for i, p in enumerate(batch)
             )
             raw = await _chat(MAP_PROMPT.format(posts=lines))
+            last_raw = raw
             data = _parse_json_content(raw)
-            for ev in data.get("events", []):
+            for ev in _get_events(data):
                 ids = []
                 for i in ev.get("post_ids", []):
                     try:
@@ -556,9 +579,10 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
                 events_repr += "\n" + _compact_post(pid, sources[pid])
 
         raw = await _chat(REDUCE_PROMPT.format(events=events_repr))
+        last_raw = raw
         data = _parse_json_content(raw)
         events: list[dict[str, Any]] = []
-        for ev in data.get("events", []):
+        for ev in _get_events(data):
             ids = sorted(set(
                 int(i) for i in ev.get("post_ids", [])
                 if str(i).lstrip("-").isdigit() and 0 <= int(i) < len(posts)
@@ -577,7 +601,10 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
         events.sort(key=lambda e: len(e["post_ids"]), reverse=True)
         return {"events": events, "mode": "llm", "error": None}
     except Exception as exc:  # pragma: no cover - securite de repli
-        return {"events": [], "mode": "fallback", "error": f"{type(exc).__name__}: {exc}"}
+        detail = f"{type(exc).__name__}: {exc}"
+        if last_raw:
+            detail += f" | extrait du modele : {last_raw[:200]!r}"
+        return {"events": [], "mode": "fallback", "error": detail}
 
 
 # ---------------------------------------------------------------------------
