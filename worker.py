@@ -285,11 +285,8 @@ def _matches_filter(text: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Entrees / sorties du workflow
+# (fenetre fixe de 24 h - pas de parametre d'entree requis)
 # ---------------------------------------------------------------------------
-
-class ReportParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    lookback_hours: int = 24
 
 
 # ---------------------------------------------------------------------------
@@ -421,8 +418,8 @@ async def compile_report(collected: dict[str, Any], since_iso: str, run_iso: str
 @workflows.workflow.define(name="bluesky_strike_monitor")
 class BlueskyStrikeMonitor:
     @workflows.workflow.entrypoint
-    async def run(self, params: ReportParams | None = None) -> dict[str, Any]:
-        lookback = params.lookback_hours if params else 24
+    async def run(self) -> dict[str, Any]:
+        lookback = 24
         now = workflows.workflow.now()
         since = now - timedelta(hours=lookback)
         since_iso = since.isoformat()
