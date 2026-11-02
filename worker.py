@@ -705,7 +705,7 @@ class BlueskyStrikeMonitor:
 
         collected = await fetch_matching_posts(since_iso)
         aggregation = await aggregate_events(collected)
-        report = await compile_report(collected, aggregation, since_iso, run_iso)
+        report = await compile_report(collected, aggregation, since_iso, run_iso, lookback)
         return report["markdown"]
 
 
