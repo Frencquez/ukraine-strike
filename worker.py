@@ -415,10 +415,14 @@ async def compile_report(collected: dict[str, Any], since_iso: str, run_iso: str
 # Workflow
 # ---------------------------------------------------------------------------
 
-@workflows.workflow.define(name="bluesky_strike_monitor")
+@workflows.workflow.define(
+    name="bluesky_strike_monitor",
+    workflow_display_name="Bluesky Strike Monitor",
+    workflow_description="Rapport quotidien des posts Bluesky sur les frappes ukrainiennes en Russie.",
+)
 class BlueskyStrikeMonitor:
     @workflows.workflow.entrypoint
-    async def run(self) -> dict[str, Any]:
+    async def run(self) -> str:
         lookback = 24
         now = workflows.workflow.now()
         since = now - timedelta(hours=lookback)
@@ -427,7 +431,7 @@ class BlueskyStrikeMonitor:
 
         collected = await fetch_matching_posts(since_iso)
         report = await compile_report(collected, since_iso, run_iso)
-        return report
+        return report["markdown"]
 
 
 # ---------------------------------------------------------------------------
