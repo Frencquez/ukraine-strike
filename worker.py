@@ -475,18 +475,25 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
         return {"events": [], "mode": "fallback",
                 "error": "cle API absente (UKRAINE_STRIKE)"}
 
-    from mistralai import Mistral
+    import httpx
 
-    client = Mistral(api_key=api_key)
-
-    def _chat(prompt: str) -> str:
-        resp = client.chat.complete(
-            model=AGGREGATION_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            timeout_ms=LLM_TIMEOUT_SECONDS * 1000,
-        )
-        return resp.choices[0].message.content or ""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(LLM_TIMEOUT_SECONDS),
+        headers={"Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json"},
+    ) as client:
+        async def _chat(prompt: str) -> str:
+            resp = await client.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                json={
+                    "model": AGGREGATION_MODEL,
+                    "temperature": 0.1,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"] or ""
 
     try:
         # ---- Etape "map" : extraction d'evenements par lot de posts ----
