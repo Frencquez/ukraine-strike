@@ -409,7 +409,7 @@ Pour chaque evenement identifie, retourne :
 Un post ne peut appartenir qu'a un seul evenement (celui qu'il decrit principalement). Un post purement general (pas un evenement concret) doit etre ignore.
 
 Reponds UNIQUEMENT avec un objet JSON valide de la forme exacte :
-{"events": [{"title": "...", "post_ids": [0], "hint": "..."}]}
+{{"events": [{{"title": "...", "post_ids": [0], "hint": "..."}}]}}
 
 Posts :
 {posts}"""
@@ -429,7 +429,7 @@ Taches :
 3. Ne garde QUE les evenements correspondant a une frappe ukrainienne sur le territoire russe ou directement lies (infrastructure russe ou territories occupes).
 
 Reponds UNIQUEMENT avec un objet JSON valide de la forme exacte :
-{"events": [{"title": "...", "summary": "...", "disagreements": ["@compte : affirmation"], "latest_correction": "...", "post_ids": [0]}]}
+{{"events": [{{"title": "...", "summary": "...", "disagreements": ["@compte : affirmation"], "latest_correction": "...", "post_ids": [0]}}]}}
 
 Evenements candidats :
 {events}"""
