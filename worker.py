@@ -2,14 +2,22 @@
 Bluesky Strike Monitor - Mistral Workflow worker.
 
 Chaque execution:
-  1. recupere les posts des dernières N heures (24 par defaut) d'une liste
+  1. recupere les posts des dernieres N heures (24 par defaut) d'une liste
      de comptes Bluesky (OSINT / presse ukrainienne et internationale),
   2. filtre ceux qui mentionnent des frappes de drones/missiles ukrainiens
      sur le territoire russe,
-  3. renvoie un rapport structure (JSON + Markdown) des cibles citees.
+  3. agrege les posts par EVENEMENT via un modele Mistral : les posts qui
+     rapportent ou commentent le meme evenement sont regroupes, leurs
+     informations synthetisees, les contradictions entre comptes sont
+     signalees (qui dit quoi), et la recence des posts est prise en compte
+     (un post plus recent, surtout s'il corrige des informations erronees,
+     est considere comme plus probablement exact),
+  4. renvoie un rapport structure (Markdown) ou les evenements sont classes
+     par nombre de posts les mentionnant (decroissant).
 
-Aucune cle API Bluesky n'est necessaire : l'API publique
-(public.api.bsky.app) suffit pour les comptes publics.
+L'agregation requiert la variable d'environnement MISTRAL_API_KEY (secret
+de workspace "MISTRAL_API_KEY"). En son absence, ou en cas d'erreur de
+l'API, le workflow retombe sur l'ancien format "compte par compte".
 
 Fichiers du depot :
   - worker.py          (ce fichier)
@@ -18,6 +26,8 @@ Fichiers du depot :
 """
 
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -221,7 +231,7 @@ BSKY_ACCOUNTS: list[str] = [
     "coupsure.bsky.social",
     "olgalautman.bsky.social",
     "glasnostgone.bsky.social",
-    "wartranslated.bsky.social",
+    "warTranslated.bsky.social",
     "warmapper.org",
     "ukraineworld.bsky.social",
     "killedinukraine.bsky.social",
@@ -276,18 +286,21 @@ MAX_PAGES_PER_ACCOUNT = 3
 PAGE_LIMIT = 100
 CONCURRENCY = 10
 
+# ---------------------------------------------------------------------------
+# Parametres de l'agregation par evenement
+# ---------------------------------------------------------------------------
+
+AGGREGATION_MODEL = os.environ.get("AGGREGATION_MODEL", "mistral-medium-latest")
+BATCH_SIZE = 60            # posts par appel "map"
+MAX_POST_CHARS = 600       # troncature du texte d'un post pour l'appel
+LLM_TIMEOUT_SECONDS = 240
+
 
 def _matches_filter(text: str) -> bool:
     t = text.lower()
     has_strike = any(k in t for k in STRIKE_KEYWORDS)
     has_russia = any(k in t for k in RUSSIA_CONTEXT_KEYWORDS)
     return has_strike and has_russia
-
-
-# ---------------------------------------------------------------------------
-# Entrees / sorties du workflow
-# (fenetre fixe de 24 h - pas de parametre d'entree requis)
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +328,6 @@ async def fetch_matching_posts(since_iso: str) -> dict[str, Any]:
             async with sem:
                 cursor = None
                 scanned = 0
-                found = 0
                 try:
                     for _ in range(MAX_PAGES_PER_ACCOUNT):
                         params: dict[str, Any] = {"actor": actor, "limit": PAGE_LIMIT}
@@ -345,7 +357,6 @@ async def fetch_matching_posts(since_iso: str) -> dict[str, Any]:
                             text = record.get("text", "")
                             scanned += 1
                             if _matches_filter(text):
-                                found += 1
                                 matching.append({
                                     "author": post.get("author", {}).get("handle", actor),
                                     "posted_at": record.get("createdAt", indexed_at),
@@ -379,14 +390,176 @@ def _post_url(uri: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Activite 2 : compilation du rapport
+# Activite 2 : aggregation des posts par evenement (Mistral LLM)
+# ---------------------------------------------------------------------------
+# Map-reduce : les posts sont groupes par lots ; chaque lot est analyse pour
+# en extraire les evenements ; puis un appel final fusionne les evenements et
+# synthetise chaque evenement, en signalant les contradictions entre comptes
+# et en pondere les informations par la recence des posts.
+
+MAP_PROMPT = """Tu es un analyste OSINT. Voici une liste numerotee de posts Bluesky (comptes OSINT et de presse couvrant les frappes ukrainiennes sur le territoire russe).
+
+Tache : regroupe les posts qui rapportent ou commentent LE MEME evenement concret (meme cible, meme lieu, meme moment). Un meme evenement peut etre vu par plusieurs comptes ; un post qui corrige une information anterieure appartient au meme evenement.
+
+Pour chaque evenement identifie, retourne :
+- "title" : titre court et factuel (en francais),
+- "post_ids" : les numeros des posts qui s'y rapportent,
+- "hint" : une phrase resume de l'evenement.
+
+Un post ne peut appartenir qu'a un seul evenement (celui qu'il decrit principalement). Un post purement general (pas un evenement concret) doit etre ignore. Reponds UNIQUEMENT en JSON valide.
+
+Posts :
+{posts}"""
+
+REDUCE_PROMPT = """Tu es un analyste OSINT charge de produire la synthese finale d'un rapport quotidien sur les frappes ukrainiennes sur le territoire russe.
+
+Tu disposes d'evenements candidats, extraits de plusieurs lots de posts, avec pour chacun les posts sources (numero, auteur, horodatage, texte).
+
+Taches :
+1. Fusionne les evenements candidats qui decrivent en realite le meme evenement (leurs post_ids doivent etre reunis).
+2. Pour chaque evenement fusionne, redige (en francais) :
+   - "title" : titre court et factuel,
+   - "summary" : synthese agregee des informations disponibles (5 a 10 phrases maximum). Donne priorite aux posts les plus RECENTS : ils ont la plus grande probabilite d'etre exacts, surtout s'ils signalent que des informations anterieures etaient erronees. Integre les corrections et les details confirmes par plusieurs comptes.
+   - "disagreements" : si des comptes se contredisent sur cet evenement, liste les desaccords en precisant QUEL compte dit QUOI (tableau de chaines, chaque entree au format "@compte : affirmation"). Sinon tableau vide.
+   - "latest_correction" : si un post recent corrige des informations anterieures erronees, resume la correction en une phrase ; sinon chaine vide.
+   - "post_ids" : tous les numeros de posts rattaches a cet evenement.
+3. Ne garde QUE les evenements correspondant a une frappe ukrainienne sur le territoire russe ou directement lies (infrastructure russe ou territories occupes). Reponds UNIQUEMENT en JSON valide.
+
+Evenements candidats :
+{events}"""
+
+
+def _compact_post(idx: int, p: dict[str, Any]) -> str:
+    text = p["text"].replace("\n", " ")[:MAX_POST_CHARS]
+    return f"[{idx}] @{p['author']} ({p['posted_at']}) : {text}"
+
+
+def _parse_json_content(content: str) -> Any:
+    """Extrait le premier objet JSON d'une reponse du modele."""
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+        content = content.strip()
+    start = content.find("{")
+    end = content.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("Aucun JSON trouve dans la reponse du modele")
+    return json.loads(content[start:end + 1])
+
+
+@workflows.activity(
+    start_to_close_timeout=timedelta(minutes=20),
+    retry_policy_max_attempts=2,
+)
+async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
+    """Regroupe les posts par evenement et synthetise chaque evenement.
+
+    Retourne {"events": [...], "mode": "llm" | "fallback", "error": ...}.
+    En cas d'absence de MISTRAL_API_KEY ou d'erreur de l'API, mode="fallback"
+    et events=[].
+    """
+    posts: list[dict[str, Any]] = collected["posts"]
+    api_key = os.environ.get("MISTRAL_API_KEY", "")
+    if not posts:
+        return {"events": [], "mode": "llm", "error": None}
+    if not api_key:
+        return {"events": [], "mode": "fallback",
+                "error": "MISTRAL_API_KEY absente"}
+
+    from mistralai import Mistral
+
+    client = Mistral(api_key=api_key)
+
+    def _chat(prompt: str) -> str:
+        resp = client.chat.complete(
+            model=AGGREGATION_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            timeout_ms=LLM_TIMEOUT_SECONDS * 1000,
+        )
+        return resp.choices[0].message.content or ""
+
+    try:
+        # ---- Etape "map" : extraction d'evenements par lot de posts ----
+        candidate_events: list[dict[str, Any]] = []
+        for start in range(0, len(posts), BATCH_SIZE):
+            batch = posts[start:start + BATCH_SIZE]
+            lines = "\n".join(
+                _compact_post(start + i, p) for i, p in enumerate(batch)
+            )
+            raw = _chat(MAP_PROMPT.format(posts=lines))
+            data = _parse_json_content(raw)
+            for ev in data.get("events", []):
+                ids = []
+                for i in ev.get("post_ids", []):
+                    try:
+                        pid = int(i)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= pid < len(posts):
+                        ids.append(pid)
+                if ids:
+                    candidate_events.append({
+                        "title": str(ev.get("title", ""))[:200],
+                        "hint": str(ev.get("hint", ""))[:400],
+                        "post_ids": sorted(set(ids)),
+                    })
+
+        if not candidate_events:
+            return {"events": [], "mode": "fallback",
+                    "error": "Aucun evenement extrait par le modele"}
+
+        # ---- Etape "reduce" : fusion et synthese par evenement ----
+        events_repr = json.dumps(candidate_events, ensure_ascii=False)
+        sources = {i: p for i, p in enumerate(posts)}
+        events_repr += "\n\nTexte des posts sources :\n"
+        for ev in candidate_events:
+            for pid in ev["post_ids"]:
+                events_repr += "\n" + _compact_post(pid, sources[pid])
+
+        raw = _chat(REDUCE_PROMPT.format(events=events_repr))
+        data = _parse_json_content(raw)
+        events: list[dict[str, Any]] = []
+        for ev in data.get("events", []):
+            ids = sorted(set(
+                int(i) for i in ev.get("post_ids", [])
+                if str(i).lstrip("-").isdigit() and 0 <= int(i) < len(posts)
+            ))
+            if not ids:
+                continue
+            disagreements = [str(d) for d in ev.get("disagreements", []) if d]
+            events.append({
+                "title": str(ev.get("title", "") or "")[:200],
+                "summary": str(ev.get("summary", "")).strip(),
+                "disagreements": disagreements,
+                "latest_correction": str(ev.get("latest_correction", "") or ""),
+                "post_ids": ids,
+            })
+        # Classement : evenement le plus rapporte en premier
+        events.sort(key=lambda e: len(e["post_ids"]), reverse=True)
+        return {"events": events, "mode": "llm", "error": None}
+    except Exception as exc:  # pragma: no cover - securite de repli
+        return {"events": [], "mode": "fallback", "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Activite 3 : compilation du rapport
 # ---------------------------------------------------------------------------
 
 @workflows.activity(start_to_close_timeout=timedelta(minutes=2))
-async def compile_report(collected: dict[str, Any], since_iso: str, run_iso: str) -> dict[str, Any]:
-    """Compile les posts en rapport Markdown lisible (sans LLM)."""
+async def compile_report(collected: dict[str, Any], aggregation: dict[str, Any],
+                         since_iso: str, run_iso: str) -> dict[str, Any]:
+    """Compile le rapport Markdown : evenement par evenement (classes par
+    nombre de posts), ou compte par compte en cas de repli."""
     posts = collected["posts"]
     stats = collected["stats"]
+    events = sorted(aggregation.get("events", []),
+                    key=lambda e: len(e.get("post_ids", [])), reverse=True)
+    mode = aggregation.get("mode", "fallback")
+    error = aggregation.get("error")
+
     lines = [
         f"# Frappes ukrainiennes sur le territoire russe - rapport du {run_iso}",
         "",
@@ -401,16 +574,47 @@ async def compile_report(collected: dict[str, Any], since_iso: str, run_iso: str
         lines.append("Comptes inaccessibles : "
                      + ", ".join(stats["accounts_unreachable_list"]))
         lines.append("")
-    if not posts:
-        lines.append("_Aucun post correspondant au filtre n'a ete trouve._")
-    for p in posts:
-        lines += [
-            f"## @{p['author']} - {p['posted_at']}",
-            p["text"],
-            f"Lien : {p['https_url'] or p['url']}",
-            "",
-        ]
-    return {"markdown": "\n".join(lines), "posts": posts, "stats": stats}
+
+    if mode == "llm" and events:
+        lines.append(f"{len(events)} evenements identifies, classes du plus rapporte au moins rapporte.")
+        lines.append("")
+        for rank, ev in enumerate(events, start=1):
+            nb = len(ev["post_ids"])
+            lines.append(f"## Evenement {rank} : {ev['title']} ({nb} posts)")
+            lines.append("")
+            if ev["summary"]:
+                lines.append(ev["summary"])
+                lines.append("")
+            if ev.get("latest_correction"):
+                lines.append(f"**Correction recente** : {ev['latest_correction']}")
+                lines.append("")
+            if ev.get("disagreements"):
+                lines.append("**Desaccord entre comptes** :")
+                lines.append("")
+                for d in ev["disagreements"]:
+                    lines.append(f"- {d}")
+                lines.append("")
+            lines.append("**Sources** :")
+            lines.append("")
+            for pid in ev["post_ids"]:
+                p = posts[pid]
+                lines.append(f"- @{p['author']} - {p['posted_at']} - {p['https_url'] or p['url']}")
+            lines.append("")
+    else:
+        if error:
+            lines.append(f"_Agregation par evenement indisponible ({error}) ; format compte par compte._")
+            lines.append("")
+        if not posts:
+            lines.append("_Aucun post correspondant au filtre n'a ete trouve._")
+        for p in posts:
+            lines += [
+                f"## @{p['author']} - {p['posted_at']}",
+                p["text"],
+                f"Lien : {p['https_url'] or p['url']}",
+                "",
+            ]
+    return {"markdown": "\n".join(lines), "posts": posts,
+            "stats": stats, "events": events, "mode": mode}
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +624,7 @@ async def compile_report(collected: dict[str, Any], since_iso: str, run_iso: str
 @workflows.workflow.define(
     name="bluesky_strike_monitor",
     workflow_display_name="Bluesky Strike Monitor",
-    workflow_description="Rapport quotidien des posts Bluesky sur les frappes ukrainiennes en Russie.",
+    workflow_description="Rapport quotidien des posts Bluesky sur les frappes ukrainiennes en Russie, agrege par evenement.",
 )
 class BlueskyStrikeMonitor:
     @workflows.workflow.entrypoint
@@ -432,7 +636,8 @@ class BlueskyStrikeMonitor:
         run_iso = now.isoformat()
 
         collected = await fetch_matching_posts(since_iso)
-        report = await compile_report(collected, since_iso, run_iso)
+        aggregation = await aggregate_events(collected)
+        report = await compile_report(collected, aggregation, since_iso, run_iso)
         return report["markdown"]
 
 
