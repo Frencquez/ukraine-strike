@@ -15,9 +15,9 @@ Chaque execution:
   4. renvoie un rapport structure (Markdown) ou les evenements sont classes
      par nombre de posts les mentionnant (decroissant).
 
-L'agregation requiert la variable d'environnement MISTRAL_API_KEY (secret
-de workspace "MISTRAL_API_KEY"). En son absence, ou en cas d'erreur de
-l'API, le workflow retombe sur l'ancien format "compte par compte".
+L'agregation requiert la variable d'environnement UKRAINE_STRIKE, liee au
+secret de workspace contenant une cle API Mistral. En son absence, ou en cas
+d'erreur de l'API, le workflow retombe sur l'ancien format "compte par compte".
 
 Fichiers du depot :
   - worker.py          (ce fichier)
@@ -457,16 +457,23 @@ async def aggregate_events(collected: dict[str, Any]) -> dict[str, Any]:
     """Regroupe les posts par evenement et synthetise chaque evenement.
 
     Retourne {"events": [...], "mode": "llm" | "fallback", "error": ...}.
-    En cas d'absence de MISTRAL_API_KEY ou d'erreur de l'API, mode="fallback"
+    En cas d'absence de cle API ou d'erreur de l'API, mode="fallback"
     et events=[].
     """
     posts: list[dict[str, Any]] = collected["posts"]
-    api_key = os.environ.get("MISTRAL_API_KEY", "")
+    # MISTRAL_API_KEY est un nom reserve dans les deploiements geres :
+    # le secret de workspace (cle API Mistral) est donc lie a la variable
+    # UKRAINE_STRIKE, definie par l'utilisateur.
+    api_key = (
+        os.environ.get("UKRAINE_STRIKE", "")
+        or os.environ.get("BSKY_MISTRAL_API_KEY", "")
+        or os.environ.get("MISTRAL_API_KEY", "")
+    )
     if not posts:
         return {"events": [], "mode": "llm", "error": None}
     if not api_key:
         return {"events": [], "mode": "fallback",
-                "error": "MISTRAL_API_KEY absente"}
+                "error": "cle API absente (UKRAINE_STRIKE)"}
 
     from mistralai import Mistral
 
