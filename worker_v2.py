@@ -341,6 +341,8 @@ CONCURRENCY = 10
 NEWS_FEEDS: list[dict[str, str]] = [
     {"source": "bne IntelliNews", "always_relevant": "1",
      "url": "https://www.intellinews.com/feed/"},
+    {"source": "Meduza (en)",
+     "url": "https://meduza.io/rss/en/all"},
     {"source": "Euronews Business",
      "url": "https://www.euronews.com/rss?level=theme&name=business"},
     {"source": "Investing.com",
