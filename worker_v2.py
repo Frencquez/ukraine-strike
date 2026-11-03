@@ -333,17 +333,24 @@ CONCURRENCY = 10
 # "economy" uniquement ; les articles ne creent pas d'evenements par eux-memes)
 # ---------------------------------------------------------------------------
 
-# Flux RSS interroges. Les requetes Google News RSS permettent de cibler
-# la presse economique et financiere internationale sans dependre d'un
-# seul editeur ; intellinews (bne IntelliNews) et Kyiv Post couvrent la
-# Russie/economie en direct.
+# Flux RSS DIRECTS d'editeurs (URLs d'origine, pas d'agrégateur type
+# Google News/MSN dont les liens rediriges sont illisibles). bne IntelliNews
+# est le specialiste de l'economie russe ; les autres couvrent l'economie
+# et la finance internationales, le filtre de pertinence ne garde que
+# Russie/Ukraine.
 NEWS_FEEDS: list[dict[str, str]] = [
-    {"source": "Google News (presse eco.)",
-     "url": "https://news.google.com/rss/search?q=Russia+economy+budget+central+bank+when:2d&hl=en-US&gl=US&ceid=US:en"},
-    {"source": "Google News (presse eco.)",
-     "url": "https://news.google.com/rss/search?q=Russia+rouble+sanctions+oil+revenue+when:2d&hl=en-US&gl=US&ceid=US:en"},
-    {"source": "bne IntelliNews",
+    {"source": "bne IntelliNews", "always_relevant": "1",
      "url": "https://www.intellinews.com/feed/"},
+    {"source": "Euronews Business",
+     "url": "https://www.euronews.com/rss?level=theme&name=business"},
+    {"source": "Investing.com",
+     "url": "https://www.investing.com/rss/news_25.rss"},
+    {"source": "MarketWatch",
+     "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
+    {"source": "Ukrinform",
+     "url": "https://www.ukrinform.net/rss/block-lastnews"},
+    {"source": "Euromaidan Press",
+     "url": "https://www.euromaidanpress.com/feed/"},
     {"source": "Kyiv Post",
      "url": "https://www.kyivpost.com/feed/"},
 ]
@@ -496,6 +503,14 @@ def _news_is_blacklisted(url: str) -> bool:
     return any(d in u for d in NEWS_BLACKLIST_DOMAINS)
 
 
+ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+
+def _el_text(el: Any, tag: str) -> str:
+    """Texte d'un element RSS (sans namespace) ou Atom (namespacé)."""
+    return (el.findtext(tag) or el.findtext(ATOM_NS + tag) or "").strip()
+
+
 def _parse_news_date(raw: str | None) -> datetime | None:
     """Parse une date RSS RFC 822 ('Tue, 03 Nov 2026 13:39:00 GMT') ou
     Atom ISO 8601 ('2026-11-03T14:38:40+00:00'). Retourne None sinon."""
@@ -553,42 +568,35 @@ async def fetch_economy_news(since_iso: str) -> dict[str, Any]:
                 count = 0
                 # Gerer a la fois RSS 2.0 (<item>) et Atom (<entry>)
                 nodes = list(root.iter("item")) or list(root.iter(
-                    "{http://www.w3.org/2005/Atom}entry"))
+                    f"{ATOM_NS}entry"))
                 for it in nodes:
                     if count >= NEWS_MAX_PER_FEED:
                         break
-                    title = (it.findtext("title") or "").strip()
+                    title = _el_text(it, "title")
                     link = (it.findtext("link") or "").strip()
                     if not link:
                         # Atom : <link href="..."/>
-                        for le in it.iter("{http://www.w3.org/2005/Atom}link"):
+                        for le in it.iter(f"{ATOM_NS}link"):
                             link = (le.get("href") or "").strip()
                             if link:
                                 break
                     if not title or not link:
                         continue
-                    if not any(k in title.lower()
-                               for k in NEWS_RELEVANCE_KEYWORDS):
+                    desc = _el_text(it, "description") or _el_text(it, "summary")
+                    if (not feed.get("always_relevant")
+                            and not any(k in title.lower()
+                                        for k in NEWS_RELEVANCE_KEYWORDS)):
                         continue
                     if _news_is_blacklisted(link):
                         continue
-                    pub_raw = it.findtext("pubDate")
-                    if not pub_raw:
-                        # Atom : <published> ou <updated>
-                        pub_raw = it.findtext(
-                            "{http://www.w3.org/2005/Atom}published"
-                        ) or it.findtext("{http://www.w3.org/2005/Atom}updated")
+                    pub_raw = _el_text(it, "pubDate") or _el_text(it, "published") \
+                        or _el_text(it, "updated")
                     pub_dt = _parse_news_date(pub_raw)
                     if pub_dt is None or pub_dt < since:
                         continue
                     if link in seen_urls:
                         continue
                     seen_urls.add(link)
-                    desc = (it.findtext("description") or "").strip()
-                    if not desc:
-                        desc = (it.findtext(
-                            "{http://www.w3.org/2005/Atom}summary"
-                        ) or "").strip()
                     items.append({
                         "source": feed["source"],
                         "title": title,
