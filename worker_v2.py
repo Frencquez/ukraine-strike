@@ -11,6 +11,9 @@ recrutement militaire force / mobilisation, economie de guerre).
 Chaque execution :
   1. recupere les posts des dernieres 24 heures d'une liste de comptes
      Bluesky (OSINT / presse ukrainienne et internationale),
+  1bis. recupere par RSS les articles recents (48 h) de presse economique
+     et financiere couvrant la Russie (budget, banque centrale, rouble,
+     sanctions, petrole), en excluant les sources de la liste noire,
   2. classe chaque post par THEME : "strikes" (frappe ukrainienne sur le
      territoire russe / territoires occupes) ou "economy" (economie,
      budget, mobilisation). Un post qui parle des deux est classe
@@ -19,7 +22,10 @@ Chaque execution :
      (map-reduce) : memes regles qu'en v1 - contradictions signalees
      (quel compte dit quoi), recence ponderee (un post plus recent,
      surtout s'il corrige des informations erronees, est considere comme
-     plus probablement exact),
+     plus probablement exact). Pour le theme "economy" uniquement, les
+     articles de presse sont fournis au modele comme contexte
+     d'enrichissement des resumes (un article ne cree jamais un evenement
+     par lui-meme ; les articles utilises sont cites en source),
   4. renvoie un rapport structure (Markdown) en deux sections :
      "Frappes ukrainiennes sur le territoire russe" puis "Economie,
      budget et mobilisation en Russie", chacune classee par nombre de
@@ -323,6 +329,53 @@ PAGE_LIMIT = 100
 CONCURRENCY = 10
 
 # ---------------------------------------------------------------------------
+# Veille presse economique et financiere (contexte d'enrichissement du theme
+# "economy" uniquement ; les articles ne creent pas d'evenements par eux-memes)
+# ---------------------------------------------------------------------------
+
+# Flux RSS interroges. Les requetes Google News RSS permettent de cibler
+# la presse economique et financiere internationale sans dependre d'un
+# seul editeur ; intellinews (bne IntelliNews) et Kyiv Post couvrent la
+# Russie/economie en direct.
+NEWS_FEEDS: list[dict[str, str]] = [
+    {"source": "Google News (presse eco.)",
+     "url": "https://news.google.com/rss/search?q=Russia+economy+budget+central+bank+when:2d&hl=en-US&gl=US&ceid=US:en"},
+    {"source": "Google News (presse eco.)",
+     "url": "https://news.google.com/rss/search?q=Russia+rouble+sanctions+oil+revenue+when:2d&hl=en-US&gl=US&ceid=US:en"},
+    {"source": "bne IntelliNews",
+     "url": "https://www.intellinews.com/feed/"},
+    {"source": "Kyiv Post",
+     "url": "https://www.kyivpost.com/feed/"},
+]
+
+# Domaines exclus (liste noire personnelle : jamais citer ces sources).
+NEWS_BLACKLIST_DOMAINS: list[str] = [
+    # medias bases en Russie
+    "rt.com", "russian.rt", "tass.ru", "tass.com", "interfax", "sputnik",
+    "rbc.ru", "vedomosti", "kommersant", "moscowtimes", "gazeta.ru",
+    "lenta.ru", "ria.ru", "1tv", "vgtrk", "rg.ru",
+    # medias bases en Chine (y compris Hong Kong)
+    "xinhua", "chinadaily", "globaltimes", "scmp.com", "news.cn",
+    "caixin", "thepaper.cn",
+    # autres sources de la liste noire
+    "foxnews", "newsmax", "breitbart",
+    # aggregation de blogs peu fiables reperee dans les recherches
+    "playnorthjoy",
+]
+
+NEWS_MAX_PER_FEED = 12      # articles retenus au maximum par flux
+MAX_NEWS_CHARS = 600       # troncature du resume d'un article
+NEWS_TIMEOUT_SECONDS = 25
+
+# Un article n'est retenu que si son TITRE mentionne la Russie, l'Ukraine
+# ou un mot-cle associe (evite le bruit : Armenie, Pologne, etc.)
+NEWS_RELEVANCE_KEYWORDS: list[str] = [
+    "russia", "russian", "ruble", "rouble", "kremlin", "moscow", "putin",
+    "ukraine", "ukrainian", "kyiv", "zelensky", "ofz", "siluanov",
+    "nabiullina", "gazprom", "rosneft", "sanction",
+]
+
+# ---------------------------------------------------------------------------
 # Parametres de l'agregation par evenement
 # ---------------------------------------------------------------------------
 
@@ -435,6 +488,141 @@ def _post_url(uri: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Activite 1bis : veille presse economique et financiere (RSS)
+# ---------------------------------------------------------------------------
+
+def _news_is_blacklisted(url: str) -> bool:
+    u = (url or "").lower()
+    return any(d in u for d in NEWS_BLACKLIST_DOMAINS)
+
+
+def _parse_news_date(raw: str | None) -> datetime | None:
+    """Parse une date RSS RFC 822 ('Tue, 03 Nov 2026 13:39:00 GMT') ou
+    Atom ISO 8601 ('2026-11-03T14:38:40+00:00'). Retourne None sinon."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(raw)  # gere 'GMT' et '+0000'
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+@workflows.activity(
+    start_to_close_timeout=timedelta(minutes=5),
+    retry_policy_max_attempts=2,
+)
+async def fetch_economy_news(since_iso: str) -> dict[str, Any]:
+    """Recupere les articles recents (24-48 h) des flux RSS de presse
+    economique et financiere, en excluant les sources de la liste noire.
+
+    Retourne {"items": [...], "stats": {...}}. Les articles servent
+    uniquement de contexte d'enrichissement du theme "economy".
+    """
+    import httpx
+    import xml.etree.ElementTree as ET
+
+    since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+    items: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    feeds_ok = 0
+    feeds_failed: list[str] = []
+
+    sem = asyncio.Semaphore(4)
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(NEWS_TIMEOUT_SECONDS),
+        headers={"User-Agent": "Mozilla/5.0 (compatible; RussiaMonitor/2.1)"},
+        follow_redirects=True,
+    ) as client:
+        async def fetch_feed(feed: dict[str, str]) -> None:
+            nonlocal feeds_ok
+            async with sem:
+                try:
+                    resp = await client.get(feed["url"])
+                    resp.raise_for_status()
+                    root = ET.fromstring(resp.text)
+                except Exception:
+                    feeds_failed.append(feed["source"])
+                    return
+                count = 0
+                # Gerer a la fois RSS 2.0 (<item>) et Atom (<entry>)
+                nodes = list(root.iter("item")) or list(root.iter(
+                    "{http://www.w3.org/2005/Atom}entry"))
+                for it in nodes:
+                    if count >= NEWS_MAX_PER_FEED:
+                        break
+                    title = (it.findtext("title") or "").strip()
+                    link = (it.findtext("link") or "").strip()
+                    if not link:
+                        # Atom : <link href="..."/>
+                        for le in it.iter("{http://www.w3.org/2005/Atom}link"):
+                            link = (le.get("href") or "").strip()
+                            if link:
+                                break
+                    if not title or not link:
+                        continue
+                    if not any(k in title.lower()
+                               for k in NEWS_RELEVANCE_KEYWORDS):
+                        continue
+                    if _news_is_blacklisted(link):
+                        continue
+                    pub_raw = it.findtext("pubDate")
+                    if not pub_raw:
+                        # Atom : <published> ou <updated>
+                        pub_raw = it.findtext(
+                            "{http://www.w3.org/2005/Atom}published"
+                        ) or it.findtext("{http://www.w3.org/2005/Atom}updated")
+                    pub_dt = _parse_news_date(pub_raw)
+                    if pub_dt is None or pub_dt < since:
+                        continue
+                    if link in seen_urls:
+                        continue
+                    seen_urls.add(link)
+                    desc = (it.findtext("description") or "").strip()
+                    if not desc:
+                        desc = (it.findtext(
+                            "{http://www.w3.org/2005/Atom}summary"
+                        ) or "").strip()
+                    items.append({
+                        "source": feed["source"],
+                        "title": title,
+                        "url": link,
+                        "published_at": pub_dt.isoformat(),
+                        "summary": desc[:MAX_NEWS_CHARS],
+                    })
+                    count += 1
+                feeds_ok += 1
+
+        await asyncio.gather(*(fetch_feed(f) for f in NEWS_FEEDS))
+
+    items.sort(key=lambda i: i["published_at"], reverse=True)
+    stats = {"feeds_total": len(NEWS_FEEDS), "feeds_ok": feeds_ok,
+             "feeds_failed_list": sorted(set(feeds_failed)),
+             "news_items": len(items)}
+    return {"items": items, "stats": stats}
+
+
+def _news_context(news: dict[str, Any] | None) -> str:
+    """Formate les articles de presse en contexte numerote [A0], [A1]...
+    Chaine vide si aucun article."""
+    if not news or not news.get("items"):
+        return ""
+    lines = ["", "Articles de presse economique et financiere recents "
+             "(contexte complementaire, prefixes [A...]) :"]
+    for i, a in enumerate(news["items"]):
+        desc = a["summary"].replace("\n", " ")
+        lines.append(f"[A{i}] ({a['source']}, {a['published_at']}) "
+                     f"{a['title']} -- {a['url']}{(' ' + desc) if desc else ''}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Activite 2 : aggregation des posts par evenement (Mistral LLM)
 # ---------------------------------------------------------------------------
 # Map-reduce par theme : les posts d'un theme sont groupes par lots ; chaque
@@ -469,6 +657,8 @@ Pour chaque evenement identifie, retourne :
 - "hint" : une phrase resume de l'evenement.
 
 Un post ne peut appartenir qu'a un seul evenement (celui qu'il decrit principalement). Un post purement general (pas un evenement concret) doit etre ignore.
+{news_context}
+Les eventuels articles de presse listes apres les posts ne servent qu'a mieux identifier les evenements : un article n'est PAS un post, ne le classe jamais dans post_ids.
 
 Reponds UNIQUEMENT avec un objet JSON valide de la forme exacte :
 {{"events": [{{"title": "...", "post_ids": [0], "hint": "..."}}]}}
@@ -479,19 +669,23 @@ Posts :
 REDUCE_PROMPT = """{theme_intro}
 
 Tu disposes d'evenements candidats, extraits de plusieurs lots de posts, avec pour chacun les posts sources (numero, auteur, horodatage, texte).
+{news_context}
 
 Taches :
 1. Fusionne les evenements candidats qui decrivent en realite le meme evenement (leurs post_ids doivent etre reunis).
 2. Pour chaque evenement fusionne, redige (en francais) :
    - "title" : titre court et factuel,
-   - "summary" : synthese agregee des informations disponibles (5 a 10 phrases maximum). Donne priorite aux posts les plus RECENTS : ils ont la plus grande probabilite d'etre exacts, surtout s'ils signalent que des informations anterieures etaient erronees. Integre les corrections et les details confirmes par plusieurs comptes.
+   - "summary" : synthese agregee des informations disponibles (5 a 10 phrases maximum). Donne priorite aux posts les plus RECENTS : ils ont la plus grande probabilite d'etre exacts, surtout s'ils signalent que des informations anterieures etaient erronees. Integre les corrections et les details confirmes par plusieurs comptes. Si des articles de presse (prefixes [A...]) portent sur ce meme evenement, UTILISE-LES pour completer et enrichir le resume (chiffres, contexte, declarations) en indiquant la source dans le texte (ex. "selon bne IntelliNews").
    - "disagreements" : si des comptes se contredisent sur cet evenement, liste les desaccords en precisant QUEL compte dit QUOI (tableau de chaines, chaque entree au format "@compte : affirmation"). Sinon tableau vide.
    - "latest_correction" : si un post recent corrige des informations anterieures erronees, resume la correction en une phrase ; sinon chaine vide.
    - "post_ids" : tous les numeros de posts rattaches a cet evenement.
+   - "article_ids" : les numeros des articles de presse (sans le prefixe [A]) reellement utilises dans le resume ; tableau vide sinon.
 {theme_filter}
 
+IMPORTANT : les articles de presse ne creent JAMAIS un evenement par eux-memes ; ils servent uniquement a enrichir les evenements identifies a partir des posts. Un evenement sans post_ids est ignore.
+
 Reponds UNIQUEMENT avec un objet JSON valide de la forme exacte :
-{{"events": [{{"title": "...", "summary": "...", "disagreements": ["@compte : affirmation"], "latest_correction": "...", "post_ids": [0]}}]}}
+{{"events": [{{"title": "...", "summary": "...", "disagreements": ["@compte : affirmation"], "latest_correction": "...", "post_ids": [0], "article_ids": []}}]}}
 
 Evenements candidats :
 {events}"""
@@ -554,8 +748,13 @@ def _get_events(data: Any) -> list[Any]:
     start_to_close_timeout=timedelta(minutes=20),
     retry_policy_max_attempts=2,
 )
-async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, Any]:
+async def aggregate_events(collected: dict[str, Any], theme: str,
+                           news: dict[str, Any] | None = None) -> dict[str, Any]:
     """Regroupe par evenement les posts du theme donne et les synthetise.
+
+    Si theme == "economy" et que "news" contient des articles de presse
+    economique, ceux-ci sont injectes comme contexte d'enrichissement
+    (le theme "strikes" n'est jamais enrichi par la presse).
 
     Retourne {"events": [...], "mode": "llm" | "fallback", "error": ...}.
     En cas d'absence de cle API ou d'erreur de l'API, mode="fallback"
@@ -578,6 +777,10 @@ async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, A
                 "error": "cle API absente (UKRAINE_STRIKE)"}
 
     import httpx
+
+    # Contexte presse : uniquement pour le theme economy
+    news_ctx = _news_context(news) if theme == "economy" else ""
+    n_news = len(news["items"]) if (theme == "economy" and news) else 0
 
     # Client cree sans gestionnaire de contexte : les appels _chat sont
     # awaits dans le bloc try ci-dessous, apres la definition.
@@ -614,7 +817,8 @@ async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, A
                 _compact_post(start + i, p) for i, p in enumerate(batch)
             )
             prompt = map_prompt_tpl.format(
-                theme_intro=THEME_MAP_INTROS[theme], posts=lines
+                theme_intro=THEME_MAP_INTROS[theme], news_context=news_ctx,
+                posts=lines,
             )
             raw = await _chat(prompt)
             last_raw = raw
@@ -650,12 +854,14 @@ async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, A
         prompt = reduce_prompt_tpl.format(
             theme_intro=THEME_REDUCE_INTROS[theme],
             theme_filter=THEME_REDUCE_FILTERS[theme],
+            news_context=news_ctx,
             events=events_repr,
         )
         raw = await _chat(prompt)
         last_raw = raw
         data = _parse_json_content(raw)
         events: list[dict[str, Any]] = []
+        news_items = news["items"] if (theme == "economy" and news) else []
         for ev in _get_events(data):
             ids = sorted(set(
                 int(i) for i in ev.get("post_ids", [])
@@ -663,6 +869,14 @@ async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, A
             ))
             if not ids:
                 continue
+            article_ids: list[int] = []
+            for a in ev.get("article_ids", []):
+                try:
+                    aid = int(a)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= aid < len(news_items) and aid not in article_ids:
+                    article_ids.append(aid)
             disagreements = [str(d) for d in ev.get("disagreements", []) if d]
             events.append({
                 "title": str(ev.get("title", "") or "")[:200],
@@ -670,6 +884,7 @@ async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, A
                 "disagreements": disagreements,
                 "latest_correction": str(ev.get("latest_correction", "") or ""),
                 "post_ids": ids,
+                "article_ids": sorted(article_ids),
             })
         # Classement : evenement le plus rapporte en premier
         events.sort(key=lambda e: len(e["post_ids"]), reverse=True)
@@ -689,7 +904,8 @@ async def aggregate_events(collected: dict[str, Any], theme: str) -> dict[str, A
 async def compile_report(collected: dict[str, Any],
                          aggregations: dict[str, dict[str, Any]],
                          since_iso: str, run_iso: str,
-                         lookback: int = 24) -> dict[str, Any]:
+                         lookback: int = 24,
+                         news: dict[str, Any] | None = None) -> dict[str, Any]:
     """Compile le rapport Markdown en deux sections : frappes, puis
     economie/budget/mobilisation. Chaque section agregee par evenement
     (classes par nombre de posts), ou compte par compte en cas de repli."""
@@ -714,6 +930,14 @@ async def compile_report(collected: dict[str, Any],
     if stats.get("accounts_unreachable_list"):
         lines.append("Comptes inaccessibles : "
                      + ", ".join(stats["accounts_unreachable_list"]))
+        lines.append("")
+    news_items = news.get("items", []) if news else []
+    news_stats = news.get("stats", {}) if news else {}
+    if news_items:
+        lines.append(f"Veille presse economique et financiere : "
+                     f"{len(news_items)} articles retenus "
+                     f"({news_stats.get('feeds_ok', 0)}/{news_stats.get('feeds_total', 0)} flux OK, "
+                     f"fenetre 48 h, sources de la liste noire exclues).")
         lines.append("")
 
     section_titles = {
@@ -758,6 +982,10 @@ async def compile_report(collected: dict[str, Any],
                 for pid in ev["post_ids"]:
                     p = theme_posts[pid]
                     lines.append(f"- @{p['author']} - {p['posted_at']} - {p['https_url'] or p['url']}")
+                for aid in ev.get("article_ids", []):
+                    if 0 <= aid < len(news_items):
+                        a = news_items[aid]
+                        lines.append(f"- [presse] {a['source']} - {a['title']} - {a['url']}")
                 lines.append("")
         else:
             if error:
@@ -796,12 +1024,15 @@ class RussiaMonitorV2:
         run_iso = now.isoformat()
 
         collected = await fetch_matching_posts(since_iso)
+        news = await fetch_economy_news(
+            (now - timedelta(hours=48)).isoformat()
+        )
         agg_strikes = await aggregate_events(collected, "strikes")
-        agg_economy = await aggregate_events(collected, "economy")
+        agg_economy = await aggregate_events(collected, "economy", news)
         report = await compile_report(
             collected,
             {"strikes": agg_strikes, "economy": agg_economy},
-            since_iso, run_iso, lookback,
+            since_iso, run_iso, lookback, news,
         )
         return report["markdown"]
 
