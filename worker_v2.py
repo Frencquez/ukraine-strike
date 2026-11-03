@@ -343,6 +343,8 @@ NEWS_FEEDS: list[dict[str, str]] = [
      "url": "https://www.intellinews.com/feed/"},
     {"source": "Meduza (en)",
      "url": "https://meduza.io/rss/en/all"},
+    {"source": "The Insider (en)",
+     "url": "https://theins.press/en/feed"},
     {"source": "Euronews Business",
      "url": "https://www.euronews.com/rss?level=theme&name=business"},
     {"source": "Investing.com",
