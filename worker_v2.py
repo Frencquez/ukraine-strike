@@ -270,6 +270,7 @@ BSKY_ACCOUNTS: list[str] = [
     "thestudyofwar.bsky.social",
     "noelreports.com",
     "kyivpost.com",
+    "@eualive.bsky.social",
 ]
 
 # ---------------------------------------------------------------------------
@@ -280,18 +281,17 @@ BSKY_ACCOUNTS: list[str] = [
 # Theme "strikes" : frappes ukrainiennes sur le territoire russe
 STRIKE_KEYWORDS: list[str] = [
     # anglais
-    "drone", "missile", "strike", "struck", "hit", "attack", "overnight",
+    "drone", "missile", "strike", "uav", "struck", "hit", "attack", "overnight",
     "refinery", "airfield", "air base", "depot", "oil terminal", "plant",
     # ukrainien
     "дрон", "безпілотник", "ракета", "удар", "атака", "влучан",
     "ніч", "рафінерія", "аеродром", "склад", "завод",
     # russe
-    "бпла", "поражен", "ноч",
-    "нпз", "рафинерия", "аэродром",
+    "бпла", "поражен", "ноч", "нпз", "рафинерия", "аэродром",
     # allemand (certains comptes francophones/germanophones)
     "drohne", "rakete", "raffinerie",
     # culture Internet / jargon specifique au conflit en Ukraine
-    "bavovna", "banderol", "meatwave", "kinetic sanction", "fp-7", "fp-9",
+    "bavovna", "banderol", "meatwave", "kinetic sanction", "fp-7", "fp-9", "flamingo"
 ]
 
 # Theme "economy" : situation economique et budgetaire de la Russie
@@ -303,7 +303,9 @@ ECONOMY_KEYWORDS: list[str] = [
     "national wealth fund", "sanction", "sanctions", "war economy",
     "recruit", "recruitment", "recruiting", "conscription",
     "mobilisation", "mobilization", "pawnshop", "labor shortage",
-    "oil revenue", "gas revenue", "price cap",
+    "oil revenue", "gas revenue", "price cap", "rdif", "wildberries", 
+    "ozon", "yandex", "lukoil", "rosneft", "gazprom", "moex", "norilsk",
+    "rusal", "novolipetsk", "surgutneftegas", "sberbank", "vtb", "tatneft",
     # ukrainien
     "бюджет", "дефіцит", "інфляція", "рубль", "мобілізація", "призов",
     # russe
@@ -313,14 +315,18 @@ ECONOMY_KEYWORDS: list[str] = [
 
 # Mots-cles qui signalent un contexte "Russie" (commun aux deux themes)
 RUSSIA_CONTEXT_KEYWORDS: list[str] = [
-    "russia", "russian", "moscow", "belgorod", "kursk", "voronezh", "rostov",
-    "nizhny novgorod", "kstovo", "saratov", "samara", "smolensk", "bryansk",
-    "oryol", "tula", "novorossiysk", "krai", "oblast", " Crimea".strip(),
+    "russia", "russian", "kremlin", "moscow", "adygea", "altai", "bashkortostan", "buryatia", "chechnya",
+    "chuvashia", "dagestan", "ingushetia", "kabardino-balkaria", "kalmykia", "karachay-cherkessia", 
+    "karelia", "khakassia", "komi", "mari", "mordovia", "north ossetia–alania", "sakha", "tatarstan",
+    "tuva", "udmurtia", "amur", "arkhangelsk", "astrakhan", "belgorod", "bryansk", "chelyabinsk",
+    "irkutsk", "ivanovo", "kaliningrad", "kaluga", "kemerovo", "kirov", "kostroma", "kurgan", "kursk",
+    "leningrad", "lipetsk", "magadan", "murmansk", "nizhny novgorod", "novgorod", "novosibirsk", "omsk", 
+    "orenburg", "oryol", "penza", "pskov", "rostov", "ryazan", "sakhalin", "samara", "saratov", "smolensk",
+    "sverdlovsk", "tambov", "tomsk", "tula", "tver", "tyumen", "ulyanovsk", "vladimir", "volgograd", "vologda",
+    "voronezh", "yaroslavl", "kstovo", "novorossiysk", "krai", "oblast", "okrug", "krai", " Crimea".strip(),
     # jargon du conflit designant la Russie / l'armee russe
-    "ruzzia", "putler", "orcs",
-    "россия", "москва", "белгород", "курск", "воронеж", "ростов",
-    "нижний новгород", "кстово", "саратов", "самара", "смоленск", "брянск",
-    "орел", "тула",
+    "ruzzia", "putler", "orcs", "россия", "москва", "белгород", "курск", "воронеж", "ростов",
+    "нижний новгород", "кстово", "саратов", "самара", "смоленск", "брянск", "орел", "тула",
 ]
 
 PUBLIC_API = "https://public.api.bsky.app/xrpc"
